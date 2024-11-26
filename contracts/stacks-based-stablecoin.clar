@@ -164,3 +164,69 @@
         collateral: (- current-collateral amount)
       }))
     (ok true)))
+
+;; Liquidate undercollateralized position
+(define-public (liquidate (user principal))
+  (let (
+    (vault (get-vault-info user))
+    (collateral-ratio (unwrap-panic (get-collateral-ratio user)))
+    (min-ratio (var-get liquidation-ratio))
+  )
+    (asserts! (< collateral-ratio min-ratio) ERR_UNAUTHORIZED)
+    (let (
+      (debt (get debt vault))
+      (collateral (get collateral vault))
+    )
+      (try! (ft-burn? stacks-stablecoin debt tx-sender))
+      (try! (as-contract (stx-transfer? collateral tx-sender tx-sender)))
+      (map-delete vaults user)
+      (var-set total-supply (- (var-get total-supply) debt))
+      (ok true))))
+
+;; Update stability fee
+(define-public (update-stability-fee (new-fee uint))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+    (var-set stability-fee new-fee)
+    (ok true)))
+
+;; Collect stability fee
+(define-public (collect-stability-fee)
+  (let (
+    (sender tx-sender)
+    (vault (get-vault-info sender))
+    (debt (get debt vault))
+    (last-fee-update (get last-fee-update vault))
+    (blocks-passed (- (var-get current-block-height) last-fee-update))
+    (fee-amount (/ (* debt (var-get stability-fee) blocks-passed) (* u100 u144))) ;; Assuming 144 blocks per day
+  )
+    (asserts! (> fee-amount u0) ERR_INVALID_AMOUNT)
+    (try! (ft-mint? stacks-stablecoin fee-amount CONTRACT_OWNER))
+    (map-set vaults sender
+      (merge vault {
+        debt: (+ debt fee-amount),
+        last-fee-update: (var-get current-block-height)
+      }))
+    (var-set total-supply (+ (var-get total-supply) fee-amount))
+    (ok true)))
+
+;; Initialize the contract
+(define-public (initialize (initial-stx-price uint))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+    (try! (ft-mint? stacks-stablecoin u0 CONTRACT_OWNER))
+    (var-set current-block-height u0)
+    (print "Stacks-Based Stablecoin initialized successfully")
+    (ok true)))
+
+
+
+;; Voting power tracking
+(define-map voter-voting-power principal uint)
+
+;; Implement oracle price update mechanism
+(define-public (update-oracle-price (new-price uint))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+    (try! (contract-call? PRICE_FEED_CONTRACT update-price new-price))
+    (ok true)))
