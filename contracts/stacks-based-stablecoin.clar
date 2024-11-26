@@ -52,6 +52,21 @@
   }
 )
 
+;; Add governance mechanism for parameter changes
+(define-map governance-proposals 
+  {
+    proposal-id: uint,
+    proposer: principal
+  }
+  {
+    proposed-ratio: uint,
+    proposed-fee: uint,
+    votes-for: uint,
+    votes-against: uint,
+    executed: bool
+  }
+)
+
 ;; Get STX/USD price
 (define-public (get-stx-price)
   (contract-call? PRICE_FEED_CONTRACT get-price))
@@ -73,3 +88,79 @@
   (ok (if (is-eq debt u0)
     u0
     (/ (* collateral stx-price) debt)))))
+
+;; Mint stablecoin
+(define-public (mint (amount uint))
+  (let (
+    (sender tx-sender)
+    (vault (get-vault-info sender))
+    (current-collateral (get collateral vault))
+    (current-debt (get debt vault))
+    (stx-price (unwrap-panic (get-stx-price)))
+    (required-collateral (/ (* amount (var-get collateralization-ratio)) stx-price))
+  )
+    (asserts! (>= (stx-get-balance sender) required-collateral) ERR_INSUFFICIENT_COLLATERAL)
+    (try! (stx-transfer? required-collateral sender (as-contract tx-sender)))
+    (try! (ft-mint? stacks-stablecoin amount sender))
+    (map-set vaults sender
+      (merge vault {
+        collateral: (+ current-collateral required-collateral),
+        debt: (+ current-debt amount),
+        last-fee-update: (var-get current-block-height)
+      }))
+    (var-set total-supply (+ (var-get total-supply) amount))
+    (ok true)))
+
+;; Burn stablecoin
+(define-public (burn (amount uint))
+  (let (
+    (sender tx-sender)
+    (vault (get-vault-info sender))
+    (current-collateral (get collateral vault))
+    (current-debt (get debt vault))
+    (stx-price (unwrap-panic (get-stx-price)))
+    (collateral-to-release (/ (* amount stx-price) (var-get collateralization-ratio)))
+  )
+    (asserts! (<= amount current-debt) ERR_INSUFFICIENT_BALANCE)
+    (try! (ft-burn? stacks-stablecoin amount sender))
+    (try! (as-contract (stx-transfer? collateral-to-release tx-sender sender)))
+    (map-set vaults sender
+      (merge vault {
+        collateral: (- current-collateral collateral-to-release),
+        debt: (- current-debt amount),
+        last-fee-update: (var-get current-block-height)
+      }))
+    (var-set total-supply (- (var-get total-supply) amount))
+    (ok true)))
+
+;; Add collateral
+(define-public (add-collateral (amount uint))
+  (let (
+    (sender tx-sender)
+    (vault (get-vault-info sender))
+    (current-collateral (get collateral vault))
+  )
+    (try! (stx-transfer? amount sender (as-contract tx-sender)))
+    (map-set vaults sender
+      (merge vault {
+        collateral: (+ current-collateral amount)
+      }))
+    (ok true)))
+
+;; Remove collateral
+(define-public (remove-collateral (amount uint))
+  (let (
+    (sender tx-sender)
+    (vault (get-vault-info sender))
+    (current-collateral (get collateral vault))
+    (current-debt (get debt vault))
+    (stx-price (unwrap-panic (get-stx-price)))
+    (new-ratio (/ (* (- current-collateral amount) stx-price) current-debt))
+  )
+    (asserts! (>= new-ratio (var-get liquidation-ratio)) ERR_BELOW_LIQUIDATION_RATIO)
+    (try! (as-contract (stx-transfer? amount tx-sender sender)))
+    (map-set vaults sender
+      (merge vault {
+        collateral: (- current-collateral amount)
+      }))
+    (ok true)))
