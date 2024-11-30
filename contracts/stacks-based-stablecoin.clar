@@ -230,3 +230,99 @@
     (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
     (try! (contract-call? PRICE_FEED_CONTRACT update-price new-price))
     (ok true)))
+
+;; Vote on governance proposal
+(define-public (vote-on-proposal (proposal-id uint) (vote-for bool))
+  (let (
+    (sender tx-sender)
+    (voting-power (default-to u0 (map-get? voter-voting-power sender)))
+    (proposal (unwrap! 
+      (map-get? governance-proposals 
+        {proposal-id: proposal-id, proposer: CONTRACT_OWNER}) 
+      ERR_UNAUTHORIZED))
+  )
+    (asserts! (not (get executed proposal)) ERR_UNAUTHORIZED)
+    (if vote-for
+      (map-set governance-proposals 
+        {proposal-id: proposal-id, proposer: CONTRACT_OWNER}
+        (merge proposal {votes-for: (+ (get votes-for proposal) voting-power)}))
+      (map-set governance-proposals 
+        {proposal-id: proposal-id, proposer: CONTRACT_OWNER}
+        (merge proposal {votes-against: (+ (get votes-against proposal) voting-power)}))
+    )
+    (ok true)))
+
+;; Execute governance proposal
+(define-public (execute-proposal (proposal-id uint))
+  (let (
+    (proposal (unwrap! 
+      (map-get? governance-proposals 
+        {proposal-id: proposal-id, proposer: CONTRACT_OWNER}) 
+      ERR_UNAUTHORIZED))
+  )
+    (asserts! (not (get executed proposal)) ERR_UNAUTHORIZED)
+    (asserts! (>= (get votes-for proposal) (/ (stx-get-balance CONTRACT_OWNER) u2)) ERR_UNAUTHORIZED)
+    
+    ;; Update parameters if proposal passes
+    (var-set collateralization-ratio (get proposed-ratio proposal))
+    (var-set stability-fee (get proposed-fee proposal))
+    
+    ;; Mark proposal as executed
+    (map-set governance-proposals 
+      {proposal-id: proposal-id, proposer: CONTRACT_OWNER}
+      (merge proposal {executed: true}))
+    
+    (ok true)))
+
+;; Implement reward mechanism for long-term stakers
+(define-public (stake-voting-tokens (amount uint))
+  (let (
+    (sender tx-sender)
+    (current-power (default-to u0 (map-get? voter-voting-power sender)))
+  )
+    (try! (stx-transfer? amount sender (as-contract tx-sender)))
+    (map-set voter-voting-power sender (+ current-power amount))
+    (ok true)))
+
+;; Unstake voting tokens
+(define-public (unstake-voting-tokens (amount uint))
+  (let (
+    (sender tx-sender)
+    (current-power (unwrap! (map-get? voter-voting-power sender) ERR_INSUFFICIENT_BALANCE))
+  )
+    (asserts! (>= current-power amount) ERR_INSUFFICIENT_BALANCE)
+    (try! (as-contract (stx-transfer? amount tx-sender sender)))
+    (map-set voter-voting-power sender (- current-power amount))
+    (ok true)))
+
+;; Emergency pause mechanism
+(define-data-var contract-paused bool false)
+
+(define-public (toggle-contract-pause)
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_UNAUTHORIZED)
+    (var-set contract-paused (not (var-get contract-paused)))
+    (ok (var-get contract-paused))))
+
+;; Add events for important actions
+(define-map events
+  {
+    event-type: (string-ascii 32),
+    user: principal,
+    timestamp: uint
+  }
+  {
+    details: (string-ascii 128)
+  }
+)
+
+(define-private (log-event (event-type (string-ascii 32)) (user principal) (details (string-ascii 128)))
+  (map-set events
+    {
+      event-type: event-type,
+      user: user,
+      timestamp: (var-get current-block-height)
+    }
+    {
+      details: details
+    }))
